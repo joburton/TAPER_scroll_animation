@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#ebebeb">
+<title>SABIN Taper</title>
+<style>
+  :root {
+    --bg: #ebebeb;           /* matches the render's background exactly */
+    --scroll-length: 400vh;  /* how much scrolling the animation takes; raise to slow it down */
+    color-scheme: light;
+  }
+  html, body { margin: 0; background: var(--bg); }
+  html { -webkit-tap-highlight-color: transparent; }
+
+  .assembly { position: relative; height: var(--scroll-length); }
+  .assembly__stage {
+    position: sticky;
+    top: 0;
+    height: 100svh;          /* small-viewport height: doesn't jump when the phone's address bar hides */
+    overflow: hidden;
+  }
+  .assembly__canvas { display: block; width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<section class="assembly">
+  <div class="assembly__stage">
+    <canvas class="assembly__canvas" role="img"
+      aria-label="The lamp's frame unfolds, then green and grey felt panels wrap around it to form a tapered shade."></canvas>
+  </div>
+</section>
+
+<script>
+(() => {
+  const FRAME_COUNT = 168;
+  // Share of the scroll spent playing; the rest holds the finished lamp on screen.
+  const PLAY_PORTION = 0.82;
+  // Smoothing time constant in ms. Time-based, so it feels the same at 60Hz and 120Hz.
+  const SMOOTHING_MS = 60;
+
+  // Scroll-to-frame map, weighted by how much actually moves in each frame
+  // (50/50 with an even split). Quiet stretches take less scroll; the busy
+  // wrap near the end gets more. MAP[i] = share of the play scroll at frame i.
+  const MAP = [0.0,0.00401,0.00802,0.01203,0.01604,0.02005,0.02406,0.02807,0.03208,0.03609,0.0401,0.0441,0.04811,0.05223,0.05655,0.06109,0.06581,0.0707,0.07573,0.08086,0.08606,0.09127,0.09648,0.10164,0.10671,0.11166,0.11648,0.12117,0.1257,0.13009,0.13432,0.13841,0.14242,0.14643,0.15044,0.15445,0.15846,0.16247,0.16648,0.17049,0.1745,0.17851,0.18252,0.18653,0.19054,0.19455,0.19861,0.2028,0.20705,0.21135,0.2157,0.22017,0.22469,0.22927,0.2339,0.23864,0.24341,0.24825,0.25313,0.25809,0.26307,0.26808,0.27308,0.27813,0.28315,0.28818,0.29318,0.29822,0.30325,0.30829,0.31333,0.31842,0.32355,0.32871,0.3339,0.33915,0.34443,0.34973,0.35503,0.36041,0.36585,0.37133,0.37686,0.38251,0.38819,0.39388,0.39958,0.40538,0.41124,0.41716,0.42316,0.42931,0.43553,0.44186,0.4483,0.45493,0.46169,0.46858,0.47563,0.48285,0.49021,0.49773,0.50542,0.51324,0.52118,0.52922,0.5373,0.5453,0.55326,0.56119,0.56914,0.57705,0.58505,0.59319,0.60147,0.60985,0.61846,0.62729,0.63634,0.64547,0.65471,0.66402,0.67331,0.68248,0.69157,0.70054,0.70941,0.7182,0.72705,0.73597,0.74493,0.75399,0.76312,0.77225,0.78133,0.79041,0.79937,0.80823,0.817,0.8257,0.83428,0.84275,0.85122,0.85965,0.86815,0.87668,0.88523,0.89364,0.90193,0.90991,0.91759,0.92483,0.9316,0.93788,0.94372,0.94912,0.95419,0.95897,0.96352,0.96784,0.97193,0.97594,0.97995,0.98396,0.98797,0.99198,0.99599,1.0];
+
+  // Frames are split across two folders (frames/1 = 000–083, frames/2 = 084–167)
+  // so each GitHub web upload stays under its 100-file limit.
+  const frameSrc = i => `frames/${i < 84 ? 1 : 2}/${String(i).padStart(3, '0')}.webp`;
+
+  const section = document.querySelector('.assembly');
+  const stage = section.querySelector('.assembly__stage');
+  const canvas = section.querySelector('.assembly__canvas');
+  const ctx = canvas.getContext('2d');
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
+
+  const images = new Array(FRAME_COUNT);   // only fully decoded frames go in here
+  let current = 0, target = 0, drawn = -1, rafId = 0, lastTime = 0;
+
+  function sizeCanvas() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const w = Math.round(canvas.clientWidth * dpr), h = Math.round(canvas.clientHeight * dpr);
+    // Phones fire resize whenever the address bar shows/hides; skip if nothing changed.
+    if (w === canvas.width && h === canvas.height) return false;
+    canvas.width = w; canvas.height = h;
+    drawn = -1;
+    return true;
+  }
+
+  function nearestReady(i) {
+    for (let d = 0; d < FRAME_COUNT; d++) {
+      if (images[i - d]) return images[i - d];
+      if (images[i + d]) return images[i + d];
+    }
+    return null;
+  }
+
+  function draw(index) {
+    const img = nearestReady(index);
+    if (!img) return;
+    const cw = canvas.width, ch = canvas.height;
+    const iw = img.naturalWidth, ih = img.naturalHeight;
+    const s = Math.min(cw / iw, ch / ih);   // frames are pre-cropped to the lamp, so "contain" fills well
+    ctx.fillStyle = '#ebebeb';
+    ctx.fillRect(0, 0, cw, ch);
+    ctx.drawImage(img, (cw - iw * s) / 2, (ch - ih * s) / 2, iw * s, ih * s);
+    drawn = img === images[index] ? index : -1;   // redraw once the exact frame arrives
+  }
+
+  // Scroll progress 0..1 across the pinned section. Uses the stage's fixed
+  // height rather than innerHeight, which changes as mobile browser bars move.
+  function progress() {
+    const total = section.offsetHeight - stage.offsetHeight;
+    const y = window.scrollY - section.offsetTop;
+    return total > 0 ? Math.min(1, Math.max(0, y / total)) : 0;
+  }
+
+  // Inverse of MAP: scroll share -> fractional frame.
+  function frameAt(u) {
+    let lo = 0, hi = FRAME_COUNT - 1;
+    while (hi - lo > 1) { const mid = (lo + hi) >> 1; (MAP[mid] <= u ? lo = mid : hi = mid); }
+    const span = MAP[hi] - MAP[lo];
+    return lo + (span > 0 ? (u - MAP[lo]) / span : 0);
+  }
+
+  function update() {
+    target = frameAt(Math.min(1, progress() / PLAY_PORTION));
+    if (!rafId) { lastTime = performance.now(); rafId = requestAnimationFrame(tick); }
+  }
+
+  function tick(now) {
+    rafId = 0;
+    const dt = Math.min(64, now - lastTime);
+    lastTime = now;
+    current = reduceMotion.matches
+      ? target
+      : current + (target - current) * (1 - Math.exp(-dt / SMOOTHING_MS));
+    if (Math.abs(target - current) < 0.02) current = target;
+    const index = Math.round(current);
+    if (index !== drawn) draw(index);
+    if (current !== target) rafId = requestAnimationFrame(tick);
+  }
+
+  // Decode off the main thread before a frame is ever drawn, so the first
+  // scrub doesn't stall decoding big images mid-scroll.
+  async function load(i) {
+    const img = new Image();
+    img.src = frameSrc(i);
+    try { await img.decode(); images[i] = img; } catch (e) { /* skip a failed frame */ }
+  }
+
+  async function preload() {
+    await load(0);
+    sizeCanvas(); draw(0);
+    // Coarse pass first (every 8th frame) so scrubbing works early, then fill in.
+    const seen = new Set([0]), queue = [];
+    for (const step of [8, 4, 2, 1])
+      for (let i = 0; i < FRAME_COUNT; i += step) if (!seen.has(i)) { seen.add(i); queue.push(i); }
+    await Promise.all(Array.from({ length: 6 }, async () => {
+      while (queue.length) {
+        await load(queue.shift());
+        if (!rafId && drawn !== Math.round(current)) draw(Math.round(current));
+      }
+    }));
+  }
+
+  addEventListener('scroll', update, { passive: true });
+  addEventListener('resize', () => { if (sizeCanvas()) draw(Math.round(current)); update(); });
+  preload().then(update);
+})();
+</script>
+</body>
+</html>
